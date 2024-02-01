@@ -1,10 +1,12 @@
 import logging
 import time
+import collections
 
 from tornado import web
 
 from ..options import options
 from ..views import BaseHandler
+from ..utils.tasks import as_dict, iter_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,6 @@ class WorkersView(BaseHandler):
         json = self.get_argument('json', default=False, type=bool)
 
         events = self.application.events.state
-
         if refresh:
             try:
                 self.application.update_workers()
@@ -46,9 +47,11 @@ class WorkersView(BaseHandler):
             if name not in events.workers:
                 continue
             worker = events.workers[name]
+            task_info = self._persistent_tasks_info(name)
             info = dict(values)
             info.update(self._as_dict(worker))
             info.update(status=worker.alive)
+            info.update(task_info)
             workers[name] = info
 
         if options.purge_offline_workers is not None:
@@ -93,3 +96,15 @@ class WorkersView(BaseHandler):
                     yield key, value
 
         return dict(_keys())
+
+    def _persistent_tasks_info(self, worker):
+        tasks_info = {status: 0 for status in ['task-received', 'task-failed', 'task-succeeded', 'task-retried']}
+        columns = {"STARTED": "active", "FAILURE": "task-failed", "SUCCESS": "task-succeeded", "RETRY": "task-retried"}
+        task_received = 0
+        for task in iter_tasks(self.application.events, worker=worker):
+            task_dict = as_dict(self.format_task(task)[1])
+            if (state := task_dict['state']) != "RECEIVED":
+                tasks_info[columns[state]] += 1
+            task_received += 1
+            tasks_info['task-received'] = task_received
+        return tasks_info
